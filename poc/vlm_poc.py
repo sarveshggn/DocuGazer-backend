@@ -1,13 +1,16 @@
-from fastapi import FastAPI, Request, UploadFile, Form
-from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
-import requests
-import uuid
-from typing import Dict, List, Optional
-from threading import Lock
-from pdf2image import convert_from_bytes
+import asyncio
 import base64
+import json
+import uuid
 from io import BytesIO
+from threading import Lock
+from typing import Dict, List, Optional
+
+import requests
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.responses import StreamingResponse, JSONResponse
+from pdf2image import convert_from_bytes
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -129,8 +132,8 @@ async def delete_session(session_id: str):
             return JSONResponse(content={"error": "Session not found"}, status_code=404)
 
 
-@app.post("/generate_image_query")
-async def generate_image_query(
+@app.post("/generate_image_response")
+async def generate_image_response(
         image: UploadFile,
         prompt: str = Form(...),
         model: Optional[str] = Form("qwen2.5vl:7b-fp16")
@@ -143,13 +146,14 @@ async def generate_image_query(
     :param model: The vision model the user wants to use\n
     :return: Text response to the user generated from the VLM\n
     """
+    # TODO: Add session history
     image_bytes = await image.read()
     response_text = process_image(image_bytes, prompt, model)
     return JSONResponse(content={"response": response_text})
 
 
-@app.post("/generate_pdf_query")
-async def generate_pdf_query(
+@app.post("/generate_pdf_response")
+async def generate_pdf_response(
         pdf: UploadFile,
         prompt: str = Form(...),
         model: Optional[str] = Form("qwen2.5vl:7b-fp16")
@@ -162,6 +166,7 @@ async def generate_pdf_query(
     :param model: The vision model the user wants to use\n
     :return: JSON response with results for each page\n
     """
+    # TODO: Add session history
     pdf_bytes = await pdf.read()
     images = convert_from_bytes(pdf_bytes)
 
@@ -174,3 +179,36 @@ async def generate_pdf_query(
         results.append({"page": page_num, "response": response_text})
 
     return JSONResponse(content={"results": results})
+
+
+# @app.post("/generate_pdf_streaming_response")
+# async def generate_pdf_streaming_response(
+#         pdf: UploadFile,
+#         prompt: str = Form(...),
+#         model: Optional[str] = Form("qwen2.5vl:7b-fp16")
+# ):
+#     """
+#     Endpoint to process each page of a PDF with a prompt, streaming results as they are generated.
+#
+#     :param pdf: The uploaded PDF file\n
+#     :param prompt: Prompt from the user\n
+#     :param model: The vision model the user wants to use\n
+#     :return: Streaming response with results for each page\n
+#     """
+#
+#     async def stream_results():
+#         pdf_bytes = await pdf.read()
+#         images = convert_from_bytes(pdf_bytes)
+#
+#         for page_num, image in enumerate(images, start=1):
+#             buffer = BytesIO()
+#             image.save(buffer, format="PNG")
+#             image_bytes = buffer.getvalue()
+#             response_text = process_image(image_bytes, prompt, model)
+#             yield json.dumps({"page": page_num, "response": response_text}) + "\n"
+#             await asyncio.sleep(0.1)
+#
+#     return StreamingResponse(
+#         stream_results(),
+#         media_type="application/x-ndjson"
+#     )
