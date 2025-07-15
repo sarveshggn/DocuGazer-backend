@@ -51,6 +51,28 @@ def process_image(image_bytes: bytes, prompt: str, model: str) -> str:
     result = response.json()
     return result.get("response")
 
+def extract_layout(image_bytes: bytes) -> dict:
+    """
+    Extract layout information from an image using the PPStructure API.
+
+    :param image_bytes: The image data in bytes\n
+    :return: Dictionary containing layout analysis results\n
+    """
+    files = {"file": ("image.png", image_bytes, "image/png")}
+    response = requests.post("http://localhost:7001/extract-json/", files=files)
+    
+    print(f"Response status: {response.status_code}")
+    print(f"Response headers: {response.headers}")
+    print(f"Response content: {response.text}")
+    
+    if response.status_code == 200:
+        layout_data = response.json()
+        print(f"Parsed JSON data: {layout_data}")
+        return layout_data
+    else:
+        print(f"Error response: {response.text}")
+        raise Exception(f"Failed to extract layout data: {response.status_code}")
+
 
 @app.get("/")
 async def root():
@@ -148,8 +170,12 @@ async def generate_image_response(
     """
     # TODO: Add session history
     image_bytes = await image.read()
-    response_text = process_image(image_bytes, prompt, model)
-    return JSONResponse(content={"response": response_text})
+    
+    try:
+        layout_data = extract_layout(image_bytes)
+        return JSONResponse(content={"layout_analysis": layout_data})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @app.post("/generate_pdf_response")
@@ -175,8 +201,12 @@ async def generate_pdf_response(
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         image_bytes = buffer.getvalue()
-        response_text = process_image(image_bytes, prompt, model)
-        results.append({"page": page_num, "response": response_text})
+        
+        try:
+            layout_data = extract_layout(image_bytes)
+            results.append({"page": page_num, "layout_analysis": layout_data})
+        except Exception as e:
+            results.append({"page": page_num, "error": str(e)})
 
     return JSONResponse(content={"results": results})
 
