@@ -11,6 +11,10 @@ from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import StreamingResponse, JSONResponse
 from pdf2image import convert_from_bytes
 from pydantic import BaseModel
+from PIL import Image
+import os
+import cv2
+import numpy as np
 
 app = FastAPI()
 
@@ -61,22 +65,89 @@ def extract_layout(image_bytes: bytes) -> dict:
     files = {"file": ("image.png", image_bytes, "image/png")}
     response = requests.post("http://localhost:7001/extract-json/", files=files)
     
-    print(f"Response status: {response.status_code}")
-    print(f"Response headers: {response.headers}")
-    print(f"Response content: {response.text}")
-    
     if response.status_code == 200:
         layout_data = response.json()
-        print(f"Parsed JSON data: {layout_data}")
         return layout_data
     else:
-        print(f"Error response: {response.text}")
         raise Exception(f"Failed to extract layout data: {response.status_code}")
+
+
+def crop_image_regions(image_bytes: bytes, layout_data: dict, output_dir: str = "cropped_regions") -> Dict[str, List[str]]:
+    """
+    Crop image regions based on layout analysis data and save them to files.
+    
+    :param image_bytes: The original image data in bytes
+    :param layout_data: JSON response from Paddle containing layout analysis
+    :param output_dir: Directory to save cropped images
+    :return: Dictionary mapping region types to lists of saved file paths
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Convert bytes to numpy array for OpenCV (for cropping only, no display)
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if cv_image is None:
+        return {}
+    
+    # Also open with PIL for cropping
+    image = Image.open(BytesIO(image_bytes))
+    
+    # Dictionary to store file paths for each region type
+    cropped_files = {}
+    
+    # Get the layout analysis data - handle both possible structures
+    if "layout_analysis" in layout_data:
+        layout_analysis = layout_data["layout_analysis"]
+    else:
+        # If layout_data itself contains the region data directly
+        layout_analysis = layout_data
+    
+    # Process each region type
+    for region_type, coordinates_list in layout_analysis.items():
+        if not isinstance(coordinates_list, list):
+            continue
+            
+        cropped_files[region_type] = []
+        
+        for i, coordinates in enumerate(coordinates_list):
+            if len(coordinates) != 4:
+                continue
+                
+            # Extract coordinates [x1, y1, x2, y2]
+            x1, y1, x2, y2 = coordinates
+            
+            # Convert to integers and ensure they're within image bounds
+            x1 = max(0, int(x1))
+            y1 = max(0, int(y1))
+            x2 = min(image.width, int(x2))
+            y2 = min(image.height, int(y2))
+            
+            # Skip if the region is invalid
+            if x1 >= x2 or y1 >= y2:
+                continue
+            
+            # Crop the image using PIL
+            cropped_image = image.crop((x1, y1, x2, y2))
+            
+            # Generate filename
+            filename = f"{region_type}_{i+1}.png"
+            filepath = os.path.join(output_dir, filename)
+            
+            # Save the cropped image
+            cropped_image.save(filepath, "PNG")
+            cropped_files[region_type].append(filepath)
+    
+    return cropped_files
 
 
 @app.get("/")
 async def root():
     return {"message": "Ollama FastAPI API with session management is running."}
+
+
+
 
 
 @app.post("/generate")
@@ -158,7 +229,8 @@ async def delete_session(session_id: str):
 async def generate_image_response(
         image: UploadFile,
         prompt: str = Form(...),
-        model: Optional[str] = Form("qwen2.5vl:7b-fp16")
+        model: Optional[str] = Form("qwen2.5vl:7b-fp16"),
+        crop_regions: Optional[bool] = Form(False)
 ):
     """
     Endpoint to process a single image with a prompt.
@@ -166,6 +238,7 @@ async def generate_image_response(
     :param image: Input image the user wants to query on\n
     :param prompt: Prompt from the user\n
     :param model: The vision model the user wants to use\n
+    :param crop_regions: Whether to crop and save detected regions\n
     :return: Text response to the user generated from the VLM\n
     """
     # TODO: Add session history
@@ -173,7 +246,19 @@ async def generate_image_response(
     
     try:
         layout_data = extract_layout(image_bytes)
-        return JSONResponse(content={"layout_analysis": layout_data})
+        
+        # Crop regions if requested
+        cropped_files = {}
+        if crop_regions:
+            output_dir = "cropped_regions_single_image"
+            cropped_files = crop_image_regions(image_bytes, layout_data, output_dir)
+        
+        result = {"layout_analysis": layout_data}
+        
+        if crop_regions:
+            result["cropped_regions"] = cropped_files
+            
+        return JSONResponse(content=result)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -182,7 +267,8 @@ async def generate_image_response(
 async def generate_pdf_response(
         pdf: UploadFile,
         prompt: str = Form(...),
-        model: Optional[str] = Form("qwen2.5vl:7b-fp16")
+        model: Optional[str] = Form("qwen2.5vl:7b-fp16"),
+        crop_regions: Optional[bool] = Form(False)
 ):
     """
     Endpoint to process a PDF with a prompt.
@@ -190,6 +276,7 @@ async def generate_pdf_response(
     :param pdf: The uploaded PDF file\n
     :param prompt: Prompt from the user\n
     :param model: The vision model the user wants to use\n
+    :param crop_regions: Whether to crop and save detected regions\n
     :return: JSON response with results for each page\n
     """
     # TODO: Add session history
@@ -204,7 +291,22 @@ async def generate_pdf_response(
         
         try:
             layout_data = extract_layout(image_bytes)
-            results.append({"page": page_num, "layout_analysis": layout_data})
+            
+            # Crop regions if requested
+            cropped_files = {}
+            if crop_regions:
+                output_dir = f"cropped_regions_page_{page_num}"
+                cropped_files = crop_image_regions(image_bytes, layout_data, output_dir)
+            
+            result = {
+                "page": page_num, 
+                "layout_analysis": layout_data
+            }
+            
+            if crop_regions:
+                result["cropped_regions"] = cropped_files
+                
+            results.append(result)
         except Exception as e:
             results.append({"page": page_num, "error": str(e)})
 
